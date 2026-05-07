@@ -315,15 +315,23 @@ def inject_css() -> None:
         font-size: 13px;
     }
 
-    /* Top-of-package "raise these prices" callout */
-    .recommend-callout {
-        background: rgba(70, 0, 255, 0.06);
-        border-left: 3px solid #4600FF;
-        padding: 12px 16px;
-        border-radius: 6px;
-        margin: 0 0 18px;
-        color: #1A1A1A;
+    /* Per-region callout — sits between the package header and the table */
+    .package-callout {
+        padding: 16px 22px;
+        background: #FAFAFF;
+        border-bottom: 1px solid #F0F0F8;
+        color: #444;
         font-size: 14px;
+        line-height: 1.55;
+    }
+    .package-callout b { color: #1A1A1A; }
+    .package-callout .lift {
+        color: #4600FF;
+        font-weight: 700;
+        background: rgba(70, 0, 255, 0.08);
+        padding: 2px 8px;
+        border-radius: 6px;
+        white-space: nowrap;
     }
     </style>
     """
@@ -661,27 +669,34 @@ def relabel_currency(cc: str, currency: str) -> str:
     return USD_TIER_BY_CC.get(cc, "USD")
 
 
-def floor_to_99(x: float) -> float:
+def round_to_nearest_99(x: float) -> float:
     """
-    Psychological rounding down to the nearest N.99.
+    Psychological rounding to the NEAREST N.99 (up or down — whichever is closer).
+    Midpoint (X.49) ties round up.
     Examples:
-      50.24 → 49.99
-      50.99 → 50.99 (already on the boundary)
-      51.00 → 50.99
-      9.50  → 8.99
-      0.50  → 0.50  (values <1 are left alone)
+      14.40 → 13.99   (closer to 13.99 than 14.99)
+      14.50 → 14.99   (midpoint — rounds up)
+      15.30 → 14.99   (closer to 14.99)
+      15.60 → 15.99   (closer to 15.99)
+      9.50  → 9.99
+      10.00 → 9.99    (10.00 is much closer to 9.99 than 10.99)
+      9.99  → 9.99
+      0.50  → 0.50    (values <1 are left alone)
     """
     if x is None:
         return None
     if x < 1:
         return round(x, 2)
-    n = int(x)  # floor for positive numbers
-    boundary = n + 0.99
-    if x >= boundary - 1e-9:
-        return round(boundary, 2)
-    if n >= 1:
-        return round(n - 1 + 0.99, 2)
-    return round(x, 2)
+    n = int(x)
+    frac = x - n
+    if frac >= 0.49:
+        return round(n + 0.99, 2)
+    return round(n - 1 + 0.99, 2)
+
+
+# Legacy alias kept for backwards compatibility within this file.
+# All callers should prefer round_to_nearest_99.
+floor_to_99 = round_to_nearest_99
 
 
 # ----------------------------------------------------------------------------
@@ -791,8 +806,9 @@ ZERO_DECIMAL_CURRENCIES: set[str] = {
 
 def round_psy_currency(price: float, currency: str) -> float:
     """
-    Per-currency psychological rounding for interpolated Mode B prices.
-    Decimal currencies → floor_to_99 (e.g., 14.32 → 13.99).
+    Per-currency psychological rounding for interpolated Mode B prices and
+    recommended retail prices.
+    Decimal currencies → round to NEAREST .99 (e.g., 14.32 → 13.99, 14.60 → 14.99).
     Zero-decimal      → snap to nearest integer ending in 99 (e.g., 1948 → 1899).
     """
     if price is None:
@@ -803,7 +819,7 @@ def round_psy_currency(price: float, currency: str) -> float:
             return float(n)
         rounded = round(n / 100.0) * 100
         return float(int(rounded) - 1)
-    return floor_to_99(price)
+    return round_to_nearest_99(price)
 
 
 def interpolate_valve_price(usd_tier: float, currency: str) -> float | None:
@@ -1082,12 +1098,37 @@ def build_recommendations(
     results: dict[str, dict] = {}
     for pkg, items in by_package.items():
         if not items:
-            results[pkg] = {"base_tier": PACKAGE_BASE_CURRENCY[pkg], "base_pub_usd": None, "rows": []}
+            results[pkg] = {
+                "base_tier": PACKAGE_BASE_CURRENCY[pkg],
+                "base_pub_usd": None,
+                "cheapest_pub_usd": None,
+                "lift_pct": None,
+                "rows": [],
+            }
             continue
 
         base_tier = PACKAGE_BASE_CURRENCY[pkg]
         base = next((i for i in items if i["tier"] == base_tier), None)
         target_pub_usd = base["current_pub_usd"] if base else None
+
+        # Cheapest current publisher USD across all currencies in the package.
+        valid_pub_usds = [
+            i["current_pub_usd"] for i in items
+            if i["current_pub_usd"] is not None
+        ]
+        cheapest_pub_usd = min(valid_pub_usds) if valid_pub_usds else None
+
+        # Lift % = (target − cheapest) / cheapest × 100.
+        # Represents the revenue gain (per unit sold in the cheapest currency)
+        # if you raise the cheapest currency to the base.
+        if (
+            target_pub_usd is not None
+            and cheapest_pub_usd is not None
+            and cheapest_pub_usd > 0
+        ):
+            lift_pct = (target_pub_usd - cheapest_pub_usd) / cheapest_pub_usd * 100
+        else:
+            lift_pct = None
 
         rows = []
         for item in items:
@@ -1109,8 +1150,7 @@ def build_recommendations(
                 else:
                     gap_pct = 0.0
 
-            # If we are not changing the price (delta == 0 or None), keep retail
-            # as-is. ψ-rounding is applied only when we are actually raising.
+            # Compute the recommendation only when there is a real raise to make.
             EPS = 1e-6
             should_change_price = (
                 delta is not None and delta > EPS
@@ -1120,12 +1160,30 @@ def build_recommendations(
                 rec_retail_usd_raw = reverse_to_retail_usd(
                     rec_pub, item["vat"], distributor_fee_pct
                 )
-                rec_retail_usd_psy = floor_to_99(rec_retail_usd_raw)
-                # local computed from ψ-rounded retail USD
+                # Round to NEAREST .99 (up or down) in USD.
+                rec_retail_usd_psy = round_to_nearest_99(rec_retail_usd_raw)
+
+                # Local: derive from rounded USD via FX, then round to nearest
+                # .99 / N99 for the local currency.
                 if item["fx"]:
-                    rec_retail_local = rec_retail_usd_psy * item["fx"]
+                    rec_retail_local = round_psy_currency(
+                        rec_retail_usd_psy * item["fx"], item["tier"]
+                    )
                 else:
                     rec_retail_local = None
+
+                # Raise-only enforcement: if rounding pulled the recommended
+                # local price ≤ current, do not recommend a lower / equal price.
+                # Mark as no-change and keep current.
+                if (
+                    rec_retail_local is not None
+                    and rec_retail_local <= item["local_price"]
+                ):
+                    rec_retail_usd_raw = item["current_retail_usd"]
+                    rec_retail_usd_psy = item["current_retail_usd"]
+                    rec_retail_local = item["local_price"]
+                    should_change_price = False
+                    delta = 0.0
             else:
                 # No change — recommendation equals current retail.
                 rec_retail_usd_raw = item["current_retail_usd"]
@@ -1163,6 +1221,8 @@ def build_recommendations(
         results[pkg] = {
             "base_tier": base_tier,
             "base_pub_usd": round(target_pub_usd, 2) if target_pub_usd is not None else None,
+            "cheapest_pub_usd": round(cheapest_pub_usd, 2) if cheapest_pub_usd is not None else None,
+            "lift_pct": round(lift_pct, 1) if lift_pct is not None else None,
             "rows": rows,
         }
 
@@ -1289,8 +1349,7 @@ def _render_package_card(pkg: str, block: dict, current_col_label: str) -> None:
             color = BRAND["pink"] if r["gap_pct"] > 0.15 else BRAND["orange"]
             items.append(
                 f'<li><span class="legend-dot" style="background:{color};"></span>'
-                f'<b>{r["tier"]}</b> — raise to ${r["rec_pub_usd"]} '
-                f'(currently ${r["current_pub_usd"]}), or remove from distribution</li>'
+                f'<b>{r["tier"]}</b> — raise the price, or remove from distribution</li>'
             )
         footer_html = (
             f'<div class="removal-box">'
@@ -1306,12 +1365,29 @@ def _render_package_card(pkg: str, block: dict, current_col_label: str) -> None:
             f'</div>'
         )
 
+    # Per-region callout: region-lock keys + revenue lift %.
+    lift_pct = block.get("lift_pct")
+    if lift_pct is not None and lift_pct > 0.05:
+        lift_html = f'<span class="lift">+{lift_pct:.1f}%</span>'
+    else:
+        lift_html = '<span class="lift">0%</span>'
+
+    callout_html = (
+        '<div class="package-callout">'
+        'We recommend creating <b>region-locked keys</b>, raising prices for '
+        'some regional currencies, or removing those currencies from partner '
+        'distribution. This will increase your distribution revenue by '
+        f'{lift_html}.'
+        '</div>'
+    )
+
     card_html = (
         f'<div class="package-section">'
         f'  <div class="package-header">'
         f'    <span class="package-title">{title}</span>'
         f'    <span class="package-meta">{meta}</span>'
         f'  </div>'
+        f'  {callout_html}'
         f'  {table_html}'
         f'  {footer_html}'
         f'</div>'
@@ -1326,14 +1402,6 @@ def render_recommendations(rec: dict[str, dict], mode: str) -> None:
     """
     current_col = (
         "Current Steam Price" if mode == "base_usd" else "Current Local Price"
-    )
-
-    st.markdown(
-        '<div class="recommend-callout">'
-        '<b>We recommend you to set the following prices for each region, '
-        'and also create regional SKUs.</b>'
-        '</div>',
-        unsafe_allow_html=True,
     )
 
     for pkg in PACKAGE_ORDER:
