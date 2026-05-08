@@ -1245,6 +1245,13 @@ def build_recommendations(
             else:
                 increase_pct = None
 
+            # Recommended SRP in USD = recommended local price converted to USD
+            # via FX. (Current SRP in USD is already in `current_retail_usd`.)
+            if item["fx"] and rec_retail_local is not None:
+                rec_srp_usd = rec_retail_local / item["fx"]
+            else:
+                rec_srp_usd = None
+
             rows.append({
                 "is_base": is_base,
                 "is_changed": should_change_price,
@@ -1261,6 +1268,7 @@ def build_recommendations(
                 "current_pub_usd": round(current_pub, 2) if current_pub is not None else None,
                 "current_net_usd": round(current_net_usd, 2) if current_net_usd is not None else None,
                 "rec_net_usd": round(rec_net_usd, 2) if rec_net_usd is not None else None,
+                "rec_srp_usd": round(rec_srp_usd, 2) if rec_srp_usd is not None else None,
                 "increase_pct": round(increase_pct, 1) if increase_pct is not None else None,
                 "target_pub_usd": round(target_pub_usd, 2) if target_pub_usd is not None else None,
                 "rec_pub_usd": round(rec_pub, 2) if rec_pub is not None else None,
@@ -1320,6 +1328,8 @@ def _render_package_card(
     block: dict,
     current_col_label: str,
     dist_share_pct: float | None = None,
+    target_currency: str = "USD",
+    fx_target: float = 1.0,
 ) -> None:
     """
     Render one package as a single visual card:
@@ -1327,6 +1337,10 @@ def _render_package_card(
 
     If `dist_share_pct` is provided (Detailed tab), an additional
     "Current Publisher Share USD" column is shown after Current SRP.
+
+    `target_currency` controls the "Current SRP in X" / "Recommended SRP in X"
+    column labels and values. Defaults to USD. `fx_target` is units of the
+    target currency per 1 USD (e.g. 0.92 for EUR, 150 for JPY, 1.0 for USD).
     """
     rows = block.get("rows", [])
     title = PACKAGE_DISPLAY.get(pkg, pkg)
@@ -1389,10 +1403,29 @@ def _render_package_card(
         else:
             inc_html = '<span style="color:#bbb">—</span>'
 
+        # Current SRP in target currency: USD value × fx_target
+        cur_srp_usd = r.get("current_retail_usd")
+        cur_srp_in_target = (
+            cur_srp_usd * fx_target if cur_srp_usd is not None else None
+        )
+        cur_srp_usd_html = _fmt_price(cur_srp_in_target, target_currency)
+
+        # Recommended SRP in target currency: USD value × fx_target
+        rec_srp_usd_val = r.get("rec_srp_usd")
+        rec_srp_in_target = (
+            rec_srp_usd_val * fx_target if rec_srp_usd_val is not None else None
+        )
+        if rec_srp_in_target is not None and is_changed:
+            inner = _fmt_price(rec_srp_in_target, target_currency)
+            rec_srp_usd_html = f'<span class="price-new">{inner}</span>'
+        else:
+            rec_srp_usd_html = _fmt_price(rec_srp_in_target, target_currency)
+
         # Build the cells for this row in the right order
         cells = [
             f'<td class="tier-cell">{tier_inner}</td>',
             f'<td class="num-cell">{current_html}</td>',
+            f'<td class="num-cell">{cur_srp_usd_html}</td>',
         ]
         if show_pub_share:
             cur_net = r.get("current_net_usd")
@@ -1404,19 +1437,23 @@ def _render_package_card(
             cells.append(f'<td class="num-cell">{pub_share_html}</td>')
         cells.extend([
             f'<td class="num-cell">{rec_html}</td>',
+            f'<td class="num-cell">{rec_srp_usd_html}</td>',
             f'<td class="num-cell">{inc_html}</td>',
         ])
         body_rows.append(f'<tr class="{cls}">' + ''.join(cells) + '</tr>')
 
-    # Build the header in the right order to match the cells above
+    # Build the header in the right order to match the cells above.
+    # The "SRP in {target}" labels rename live with the currency selector.
     header_cells = [
         '<th>Tier</th>',
         f'<th class="num">{current_col_label}</th>',
+        f'<th class="num">Current SRP in {target_currency}</th>',
     ]
     if show_pub_share:
         header_cells.append('<th class="num">Current Publisher Share USD</th>')
     header_cells.extend([
         '<th class="num">Recommended Local Price</th>',
+        f'<th class="num">Recommended SRP in {target_currency}</th>',
         '<th class="num">Increase %</th>',
     ])
 
@@ -1493,24 +1530,51 @@ def _render_package_card(
     st.markdown(card_html, unsafe_allow_html=True)
 
 
-def render_recommendations(rec: dict[str, dict], mode: str) -> None:
+def _build_currency_options(rec: dict[str, dict]) -> list[str]:
+    """
+    Collect all currency tiers that appear in the recommendation (across all
+    packages), filter out synthetic USD_* tiers (they all = USD), and return
+    the list with USD pinned to the front so it serves as the default.
+    """
+    tiers: set[str] = set()
+    for pkg in PACKAGE_ORDER:
+        for r in rec.get(pkg, {}).get("rows", []):
+            tiers.add(r["tier"])
+    real = sorted(t for t in tiers if not t.startswith("USD_"))
+    if "USD" in real:
+        real.remove("USD")
+    return ["USD"] + real
+
+
+def render_recommendations(
+    rec: dict[str, dict],
+    mode: str,
+    target_currency: str = "USD",
+    fx_target: float = 1.0,
+) -> None:
     """
     Render results as one clean stack of package cards (no extra columns).
     `mode` only affects the label of the "current" column.
+    `target_currency` / `fx_target` control the "SRP in X" columns.
     """
     current_col = (
         "Current Steam Price" if mode == "base_usd" else "Current Local Price"
     )
-
     for pkg in PACKAGE_ORDER:
         block = rec.get(pkg, {})
-        _render_package_card(pkg, block, current_col)
+        _render_package_card(
+            pkg, block, current_col,
+            target_currency=target_currency,
+            fx_target=fx_target,
+        )
 
 
 def render_detailed(
     rec: dict[str, dict],
     mode: str,
     dist_share_pct: float,
+    target_currency: str = "USD",
+    fx_target: float = 1.0,
 ) -> None:
     """
     Same as render_recommendations, but with an extra "Current Publisher Share
@@ -1521,7 +1585,12 @@ def render_detailed(
     )
     for pkg in PACKAGE_ORDER:
         block = rec.get(pkg, {})
-        _render_package_card(pkg, block, current_col, dist_share_pct=dist_share_pct)
+        _render_package_card(
+            pkg, block, current_col,
+            dist_share_pct=dist_share_pct,
+            target_currency=target_currency,
+            fx_target=fx_target,
+        )
 
 
 def _render_params_card() -> tuple[str, str, float, bool]:
@@ -1643,6 +1712,7 @@ def main() -> None:
             "mode_label": mode_label,
             "results_header": results_header,
             "csv_suffix": csv_suffix,
+            "fx_rates": fx_rates,
         }
 
     # If user hasn't pressed Calculate yet (and there's nothing stashed), prompt.
@@ -1653,18 +1723,33 @@ def main() -> None:
     results = st.session_state.app_results
     rec = results["rec"]
     saved_mode = results["mode_label"]
+    fx_rates_saved = results.get("fx_rates", {})
 
     st.markdown(
         f'<div class="results-header">{results["results_header"]}</div>',
         unsafe_allow_html=True,
     )
 
+    # ----- Currency selector — affects the "SRP in X" columns in both tabs -----
+    currency_options = _build_currency_options(rec)
+    target_currency = st.selectbox(
+        "Convert prices to",
+        options=currency_options,
+        index=0,
+        key="target_currency",
+        help=(
+            "Convert the 'SRP in …' columns to this currency in the tables "
+            "below. Defaults to USD."
+        ),
+    )
+    fx_target = fx_rate_for_tier(target_currency, fx_rates_saved) or 1.0
+
     # ----- Two tabs: Recommendations | Detailed -----
     tab_rec, tab_detailed = st.tabs(["🎯 Recommendations", "📋 Detailed"])
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
 
     with tab_rec:
-        render_recommendations(rec, saved_mode)
+        render_recommendations(rec, saved_mode, target_currency, fx_target)
 
         # CSV export — 7 columns, no Pub Share
         all_rows = []
@@ -1703,7 +1788,7 @@ def main() -> None:
             key="dist_share",
         )
 
-        render_detailed(rec, saved_mode, dist_share_pct)
+        render_detailed(rec, saved_mode, dist_share_pct, target_currency, fx_target)
 
         # CSV export — 9 columns, includes Pub Share
         share_factor = 1 - dist_share_pct / 100.0
