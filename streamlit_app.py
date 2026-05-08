@@ -1286,14 +1286,24 @@ def _package_meta_line(block: dict) -> str:
     return f"base {base_tier} · target ${base_pub_usd:.2f}"
 
 
-def _render_package_card(pkg: str, block: dict, current_col_label: str) -> None:
+def _render_package_card(
+    pkg: str,
+    block: dict,
+    current_col_label: str,
+    dist_share_pct: float | None = None,
+) -> None:
     """
     Render one package as a single visual card:
       [colored header] [clean HTML table] [removal candidates / OK footer]
+
+    If `dist_share_pct` is provided (Detailed tab), an additional
+    "Current Publisher Share USD" column is shown after Current SRP.
     """
     rows = block.get("rows", [])
     title = PACKAGE_DISPLAY.get(pkg, pkg)
     meta = _package_meta_line(block)
+    show_pub_share = dist_share_pct is not None
+    share_factor = (1 - dist_share_pct / 100.0) if show_pub_share else None
 
     # If the package has no data at all, render a thin "no data" card
     if not rows:
@@ -1350,24 +1360,41 @@ def _render_package_card(pkg: str, block: dict, current_col_label: str) -> None:
         else:
             inc_html = '<span style="color:#bbb">—</span>'
 
-        body_rows.append(
-            f'<tr class="{cls}">'
-            f'  <td class="tier-cell">{tier_inner}</td>'
-            f'  <td class="num-cell">{current_html}</td>'
-            f'  <td class="num-cell">{rec_html}</td>'
-            f'  <td class="num-cell">{inc_html}</td>'
-            f'</tr>'
-        )
+        # Build the cells for this row in the right order
+        cells = [
+            f'<td class="tier-cell">{tier_inner}</td>',
+            f'<td class="num-cell">{current_html}</td>',
+        ]
+        if show_pub_share:
+            cur_net = r.get("current_net_usd")
+            if cur_net is not None:
+                cur_pub_share = cur_net * share_factor
+                pub_share_html = f'${cur_pub_share:,.2f}'
+            else:
+                pub_share_html = '<span style="color:#bbb">—</span>'
+            cells.append(f'<td class="num-cell">{pub_share_html}</td>')
+        cells.extend([
+            f'<td class="num-cell">{rec_html}</td>',
+            f'<td class="num-cell">{inc_html}</td>',
+        ])
+        body_rows.append(f'<tr class="{cls}">' + ''.join(cells) + '</tr>')
+
+    # Build the header in the right order to match the cells above
+    header_cells = [
+        '<th>Tier</th>',
+        f'<th class="num">{current_col_label}</th>',
+    ]
+    if show_pub_share:
+        header_cells.append('<th class="num">Current Publisher Share USD</th>')
+    header_cells.extend([
+        '<th class="num">Recommended Local Price</th>',
+        '<th class="num">Increase %</th>',
+    ])
 
     table_html = (
         f'<table class="rec-table">'
         f'  <thead>'
-        f'    <tr>'
-        f'      <th>Tier</th>'
-        f'      <th class="num">{current_col_label}</th>'
-        f'      <th class="num">Recommended Local Price</th>'
-        f'      <th class="num">Increase %</th>'
-        f'    </tr>'
+        f'    <tr>{"".join(header_cells)}</tr>'
         f'  </thead>'
         f'  <tbody>{"".join(body_rows)}</tbody>'
         f'</table>'
@@ -1434,7 +1461,7 @@ def _render_package_card(pkg: str, block: dict, current_col_label: str) -> None:
 
 def render_recommendations(rec: dict[str, dict], mode: str) -> None:
     """
-    Render results as one clean stack of package cards (no tabs, no expanders).
+    Render results as one clean stack of package cards (no extra columns).
     `mode` only affects the label of the "current" column.
     """
     current_col = (
@@ -1444,6 +1471,23 @@ def render_recommendations(rec: dict[str, dict], mode: str) -> None:
     for pkg in PACKAGE_ORDER:
         block = rec.get(pkg, {})
         _render_package_card(pkg, block, current_col)
+
+
+def render_detailed(
+    rec: dict[str, dict],
+    mode: str,
+    dist_share_pct: float,
+) -> None:
+    """
+    Same as render_recommendations, but with an extra "Current Publisher Share
+    USD" column derived from the user-selected distribution share.
+    """
+    current_col = (
+        "Current Steam Price" if mode == "base_usd" else "Current Local Price"
+    )
+    for pkg in PACKAGE_ORDER:
+        block = rec.get(pkg, {})
+        _render_package_card(pkg, block, current_col, dist_share_pct=dist_share_pct)
 
 
 def _render_params_card() -> tuple[str, str, float, bool]:
@@ -1527,78 +1571,133 @@ def main() -> None:
 
     mode_label, appid, base_usd, run = _render_params_card()
 
-    if not run:
+    # Distributor fee is hardcoded to zero in the recommendation math — it
+    # cancels out of the formula anyway. Distribution Share (on the Detailed
+    # tab) only affects the displayed Publisher Share USD figure.
+    DISTRIBUTOR_FEE_PCT = 0.0
+
+    # ----- Compute on Calculate, then stash in session_state -----
+    if run:
+        if mode_label == "appid":
+            if not appid.isdigit():
+                st.error("AppID must be a number, e.g. `730`.")
+                st.stop()
+            meta = fetch_app_meta(appid)
+            app_name = (meta or {}).get("name") or f"AppID {appid}"
+            progress_bar = st.progress(0.0, text="Fetching prices from Steam Store API…")
+            _df, fx_rates, fx_last, raw_results = build_pricing_table(
+                appid=appid,
+                distributor_fee_pct=DISTRIBUTOR_FEE_PCT,
+                progress_cb=lambda p: progress_bar.progress(p, text=f"Fetching prices… {int(p*100)}%"),
+            )
+            progress_bar.empty()
+            results_header = app_name
+            csv_suffix = appid
+        else:
+            if base_usd <= 0:
+                st.error("Base USD price must be greater than 0.")
+                st.stop()
+            with st.spinner("Loading Valve's suggested-pricing matrix…"):
+                fx_rates, fx_last = fetch_fx_rates()
+                raw_results = synthesize_raw_results_from_usd(base_usd)
+            results_header = f"Valve suggested pricing @ ${base_usd:.2f}"
+            csv_suffix = f"base_{base_usd:.2f}"
+
+        rec = build_recommendations(raw_results, fx_rates, DISTRIBUTOR_FEE_PCT)
+        st.session_state.app_results = {
+            "rec": rec,
+            "mode_label": mode_label,
+            "results_header": results_header,
+            "csv_suffix": csv_suffix,
+        }
+
+    # If user hasn't pressed Calculate yet (and there's nothing stashed), prompt.
+    if "app_results" not in st.session_state:
         st.info("Pick an input mode, set parameters, and click **Calculate**.")
         st.stop()
 
-    # Distributor fee is not configurable in the publisher edition — it
-    # cancels out of the recommendation math anyway (see internal note).
-    DISTRIBUTOR_FEE_PCT = 0.0
+    results = st.session_state.app_results
+    rec = results["rec"]
+    saved_mode = results["mode_label"]
 
-    if mode_label == "appid":
-        if not appid.isdigit():
-            st.error("AppID must be a number, e.g. `730`.")
-            st.stop()
-
-        meta = fetch_app_meta(appid)
-        app_name = (meta or {}).get("name") or f"AppID {appid}"
-
-        progress_bar = st.progress(0.0, text="Fetching prices from Steam Store API…")
-        _df, fx_rates, fx_last, raw_results = build_pricing_table(
-            appid=appid,
-            distributor_fee_pct=DISTRIBUTOR_FEE_PCT,
-            progress_cb=lambda p: progress_bar.progress(p, text=f"Fetching prices… {int(p*100)}%"),
-        )
-        progress_bar.empty()
-
-        download_label_suffix = appid
-        st.markdown(
-            f'<div class="results-header">{app_name}</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        if base_usd <= 0:
-            st.error("Base USD price must be greater than 0.")
-            st.stop()
-
-        with st.spinner("Loading Valve's suggested-pricing matrix…"):
-            fx_rates, fx_last = fetch_fx_rates()
-            raw_results = synthesize_raw_results_from_usd(base_usd)
-
-        download_label_suffix = f"base_{base_usd:.2f}"
-        st.markdown(
-            f'<div class="results-header">Valve suggested pricing @ ${base_usd:.2f}</div>',
-            unsafe_allow_html=True,
-        )
-
-    rec = build_recommendations(raw_results, fx_rates, DISTRIBUTOR_FEE_PCT)
-
-    # ---- Render the recommendation cards ----
-    render_recommendations(rec, mode_label)
-
-    # Combined CSV export of all recommendations.
-    # Columns (publisher edition):
-    #   SKU, tier, VAT, Current SRP, Current NET Price USD,
-    #   Recommended NET Price USD, Recommended SRP
-    all_rows = []
-    for pkg in PACKAGE_ORDER:
-        for r in rec.get(pkg, {}).get("rows", []):
-            all_rows.append({
-                "SKU": pkg,
-                "tier": r["tier"],
-                "VAT": round(r["vat"] * 100, 1),  # numeric percent (e.g. 16.0)
-                "Current SRP": r["current_local_price"],
-                "Current NET Price USD": r["current_net_usd"],
-                "Recommended NET Price USD": r["rec_net_usd"],
-                "Recommended SRP": r["rec_retail_local"],
-            })
-    rec_df = pd.DataFrame(all_rows)
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-    st.download_button(
-        "💾 Download CSV (recommendations)",
-        data=rec_df.to_csv(index=False).encode("utf-8"),
-        file_name=f"steam_pricing_rec_{download_label_suffix}_{ts}.csv",
+    st.markdown(
+        f'<div class="results-header">{results["results_header"]}</div>',
+        unsafe_allow_html=True,
     )
+
+    # ----- Two tabs: Recommendations | Detailed -----
+    tab_rec, tab_detailed = st.tabs(["🎯 Recommendations", "📋 Detailed"])
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+
+    with tab_rec:
+        render_recommendations(rec, saved_mode)
+
+        # CSV export — 7 columns, no Pub Share
+        all_rows = []
+        for pkg in PACKAGE_ORDER:
+            for r in rec.get(pkg, {}).get("rows", []):
+                all_rows.append({
+                    "SKU": pkg,
+                    "tier": r["tier"],
+                    "VAT": round(r["vat"] * 100, 1),
+                    "Current SRP": r["current_local_price"],
+                    "Current NET Price USD": r["current_net_usd"],
+                    "Recommended NET Price USD": r["rec_net_usd"],
+                    "Recommended SRP": r["rec_retail_local"],
+                })
+        rec_df = pd.DataFrame(all_rows)
+        st.download_button(
+            "💾 Download CSV (recommendations)",
+            data=rec_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"prs_rec_{results['csv_suffix']}_{ts}.csv",
+            key="dl_rec",
+        )
+
+    with tab_detailed:
+        dist_share_pct = st.number_input(
+            "Distribution Share, %",
+            min_value=0.0,
+            max_value=99.0,
+            value=20.0,
+            step=0.5,
+            help=(
+                "Percentage that the distributor takes from each sale. "
+                "Affects only the displayed Publisher Share USD figures — "
+                "recommended retail prices are independent of this value "
+                "(the fee cancels out of the math)."
+            ),
+            key="dist_share",
+        )
+
+        render_detailed(rec, saved_mode, dist_share_pct)
+
+        # CSV export — 9 columns, includes Pub Share
+        share_factor = 1 - dist_share_pct / 100.0
+        det_rows = []
+        for pkg in PACKAGE_ORDER:
+            for r in rec.get(pkg, {}).get("rows", []):
+                cur_net = r["current_net_usd"]
+                rec_net = r["rec_net_usd"]
+                cur_share = round(cur_net * share_factor, 2) if cur_net is not None else None
+                rec_share = round(rec_net * share_factor, 2) if rec_net is not None else None
+                det_rows.append({
+                    "SKU": pkg,
+                    "tier": r["tier"],
+                    "VAT": round(r["vat"] * 100, 1),
+                    "Current SRP": r["current_local_price"],
+                    "Current NET Price USD": cur_net,
+                    "Current Publisher Share USD": cur_share,
+                    "Recommended NET Price USD": rec_net,
+                    "Recommended Publisher Share USD": rec_share,
+                    "Recommended SRP": r["rec_retail_local"],
+                })
+        det_df = pd.DataFrame(det_rows)
+        st.download_button(
+            "💾 Download CSV (detailed)",
+            data=det_df.to_csv(index=False).encode("utf-8"),
+            file_name=f"prs_detailed_{results['csv_suffix']}_{ts}.csv",
+            key="dl_detailed",
+        )
 
     st.markdown("---")
     st.caption(
