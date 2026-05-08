@@ -57,21 +57,21 @@ ROW_TINT_PINK   = "rgba(255, 56, 149, 0.20)"
 
 def inject_css() -> None:
     """
-    Load Poppins and apply targeted Streamlit styling.
+    Load Raleway and apply targeted Streamlit styling.
 
     Important: do NOT use broad selectors like [class*="st-"] with !important
     on font-family — that overrides Material Symbols Rounded on Streamlit's
     icons (the sidebar collapse arrow renders as raw text 'keyboard_double_…').
-    Instead, set Poppins at the root (cascade) and EXPLICITLY restore the
+    Instead, set Raleway at the root (cascade) and EXPLICITLY restore the
     icon font.
     """
     css = """
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Raleway:wght@300;400;500;600;700&display=swap');
 
-    /* Poppins via the root — cascades to text elements */
+    /* Raleway via the root — cascades to text elements */
     html, body, .stApp, [data-testid="stAppViewContainer"], [data-testid="stSidebar"] {
-        font-family: 'Poppins', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        font-family: 'Raleway', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
 
     /* Restore the Material Symbols font on icon elements so they render as
@@ -93,7 +93,7 @@ def inject_css() -> None:
 
     /* Headings */
     h1, h2, h3, h4 {
-        font-family: 'Poppins', sans-serif;
+        font-family: 'Raleway', sans-serif;
         font-weight: 600;
         color: #1A1A1A;
     }
