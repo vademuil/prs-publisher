@@ -333,6 +333,35 @@ def inject_css() -> None:
         border-radius: 6px;
         white-space: nowrap;
     }
+    .package-callout .callout-header {
+        font-weight: 600;
+        color: #1A1A1A;
+        margin-bottom: 6px;
+    }
+    .package-callout .callout-list {
+        margin: 4px 0 10px;
+        padding-left: 0;
+        list-style: none;
+    }
+    .package-callout .callout-list li {
+        padding-left: 22px;
+        position: relative;
+        margin: 3px 0;
+        line-height: 1.55;
+        color: #444;
+    }
+    .package-callout .callout-list li::before {
+        content: "•";
+        color: #4600FF;
+        font-weight: 700;
+        font-size: 16px;
+        position: absolute;
+        left: 8px;
+        top: -1px;
+    }
+    .package-callout .callout-footer {
+        margin-top: 6px;
+    }
     </style>
     """
     st.markdown(css, unsafe_allow_html=True)
@@ -1429,7 +1458,7 @@ def _render_package_card(
             f'</div>'
         )
 
-    # Per-region callout: region-lock keys + revenue lift %.
+    # Per-region callout: header + bullet list + revenue lift %.
     lift_pct = block.get("lift_pct")
     if lift_pct is not None and lift_pct > 0.05:
         lift_html = f'<span class="lift">+{lift_pct:.1f}%</span>'
@@ -1438,10 +1467,15 @@ def _render_package_card(
 
     callout_html = (
         '<div class="package-callout">'
-        'We recommend creating <b>region-locked keys</b>, raising prices for '
-        'some regional currencies, or removing those currencies from partner '
-        'distribution. This will increase your distribution revenue by '
-        f'{lift_html}.'
+        '  <div class="callout-header">We recommend:</div>'
+        '  <ul class="callout-list">'
+        '    <li>create region-locked keys</li>'
+        '    <li>increase prices for some regional currencies, or</li>'
+        '    <li>remove those currencies from partner distribution</li>'
+        '  </ul>'
+        '  <div class="callout-footer">'
+        f'    This will increase your distribution revenue by {lift_html}.'
+        '  </div>'
         '</div>'
     )
 
