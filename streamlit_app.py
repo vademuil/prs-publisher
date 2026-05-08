@@ -1436,8 +1436,8 @@ def _render_package_card(
                 pub_share_html = '<span style="color:#bbb">—</span>'
             cells.append(f'<td class="num-cell">{pub_share_html}</td>')
         cells.extend([
-            f'<td class="num-cell">{rec_html}</td>',
             f'<td class="num-cell">{rec_srp_usd_html}</td>',
+            f'<td class="num-cell">{rec_html}</td>',
             f'<td class="num-cell">{inc_html}</td>',
         ])
         body_rows.append(f'<tr class="{cls}">' + ''.join(cells) + '</tr>')
@@ -1452,8 +1452,8 @@ def _render_package_card(
     if show_pub_share:
         header_cells.append('<th class="num">Current Publisher Share USD</th>')
     header_cells.extend([
-        '<th class="num">Recommended Local Price</th>',
         f'<th class="num">Recommended SRP in {target_currency}</th>',
+        '<th class="num">Recommended Local Price</th>',
         '<th class="num">Increase %</th>',
     ])
 
