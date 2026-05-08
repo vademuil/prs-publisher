@@ -387,7 +387,7 @@ VAT_TABLE: dict[str, tuple[float, str]] = {
     "BY": (0.200, "Belarus"),
     "CH": (0.081, "Switzerland"),
     "CL": (0.190, "Chile"),
-    "CN": (0.060, "China"),  # Steam tax FAQ uses XC code; Steam global cc=cn pricing
+    "CN": (0.160, "China"),  # Steam tax FAQ uses XC code; Steam global cc=cn pricing
     "CO": (0.190, "Colombia"),
     "CY": (0.190, "Cyprus"),
     "CZ": (0.210, "Czech Republic"),
@@ -569,7 +569,7 @@ PACKAGE_BASE_CURRENCY: dict[str, str] = {
     "CN_ONLY": "CNY",
     "RU_CIS":  "RUB",
     "LATAM":   "BRL",
-    "MENA":    "ILS",
+    "MENA":    "USD_MENA",
 }
 
 PACKAGE_DISPLAY: dict[str, str] = {
@@ -1190,6 +1190,32 @@ def build_recommendations(
                 rec_retail_usd_psy = item["current_retail_usd"]
                 rec_retail_local = item["local_price"]
 
+            # NET Price USD = SRP_local / (1 + vat) / fx
+            # current_net_usd is identical to current_pub_usd (with fee=0)
+            # rec_net_usd is computed from the rounded recommended SRP so that
+            # the spreadsheet figure matches what the publisher actually gets
+            # if they list the recommended retail price.
+            if item["fx"] and item["fx"] > 0:
+                current_net_usd = (item["local_price"] / (1 + item["vat"])) / item["fx"]
+                if rec_retail_local is not None:
+                    rec_net_usd = (rec_retail_local / (1 + item["vat"])) / item["fx"]
+                else:
+                    rec_net_usd = None
+            else:
+                current_net_usd = None
+                rec_net_usd = None
+
+            # Increase % on retail (local) basis — what % above current SRP we
+            # are recommending. Zero when there is no raise.
+            if (
+                rec_retail_local is not None
+                and item["local_price"] is not None
+                and item["local_price"] > 0
+            ):
+                increase_pct = (rec_retail_local - item["local_price"]) / item["local_price"] * 100
+            else:
+                increase_pct = None
+
             rows.append({
                 "is_base": is_base,
                 "is_changed": should_change_price,
@@ -1204,6 +1230,9 @@ def build_recommendations(
                 "current_retail_usd": round(item["current_retail_usd"], 2)
                     if item["current_retail_usd"] is not None else None,
                 "current_pub_usd": round(current_pub, 2) if current_pub is not None else None,
+                "current_net_usd": round(current_net_usd, 2) if current_net_usd is not None else None,
+                "rec_net_usd": round(rec_net_usd, 2) if rec_net_usd is not None else None,
+                "increase_pct": round(increase_pct, 1) if increase_pct is not None else None,
                 "target_pub_usd": round(target_pub_usd, 2) if target_pub_usd is not None else None,
                 "rec_pub_usd": round(rec_pub, 2) if rec_pub is not None else None,
                 "delta_pub_usd": round(delta, 2) if delta is not None else None,
@@ -1315,11 +1344,18 @@ def _render_package_card(pkg: str, block: dict, current_col_label: str) -> None:
         else:
             rec_html = _fmt_price(r["rec_retail_local"], currency)
 
+        # Increase % cell — only meaningful for changed (raised) rows
+        if is_changed and r.get("increase_pct") is not None and r["increase_pct"] > 0:
+            inc_html = f'<span class="price-new">+{r["increase_pct"]:.1f}%</span>'
+        else:
+            inc_html = '<span style="color:#bbb">—</span>'
+
         body_rows.append(
             f'<tr class="{cls}">'
             f'  <td class="tier-cell">{tier_inner}</td>'
             f'  <td class="num-cell">{current_html}</td>'
             f'  <td class="num-cell">{rec_html}</td>'
+            f'  <td class="num-cell">{inc_html}</td>'
             f'</tr>'
         )
 
@@ -1330,6 +1366,7 @@ def _render_package_card(pkg: str, block: dict, current_col_label: str) -> None:
         f'      <th>Tier</th>'
         f'      <th class="num">{current_col_label}</th>'
         f'      <th class="num">Recommended Local Price</th>'
+        f'      <th class="num">Increase %</th>'
         f'    </tr>'
         f'  </thead>'
         f'  <tbody>{"".join(body_rows)}</tbody>'
@@ -1539,21 +1576,21 @@ def main() -> None:
     # ---- Render the recommendation cards ----
     render_recommendations(rec, mode_label)
 
-    # Combined CSV export of all recommendations
+    # Combined CSV export of all recommendations.
+    # Columns (publisher edition):
+    #   SKU, tier, VAT, Current SRP, Current NET Price USD,
+    #   Recommended NET Price USD, Recommended SRP
     all_rows = []
     for pkg in PACKAGE_ORDER:
         for r in rec.get(pkg, {}).get("rows", []):
             all_rows.append({
-                "package": pkg,
-                "is_base": r["is_base"],
-                "is_changed": r["is_changed"],
+                "SKU": pkg,
                 "tier": r["tier"],
-                "country": r["country"],
-                "vat_pct": r["vat_pct"],
-                "current_local_price": r["current_local_price"],
-                "current_retail_usd": r["current_retail_usd"],
-                "rec_retail_usd_psy": r["rec_retail_usd_psy"],
-                "rec_retail_local": r["rec_retail_local"],
+                "VAT": round(r["vat"] * 100, 1),  # numeric percent (e.g. 16.0)
+                "Current SRP": r["current_local_price"],
+                "Current NET Price USD": r["current_net_usd"],
+                "Recommended NET Price USD": r["rec_net_usd"],
+                "Recommended SRP": r["rec_retail_local"],
             })
     rec_df = pd.DataFrame(all_rows)
     ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
