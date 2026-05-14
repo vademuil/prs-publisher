@@ -78,7 +78,7 @@ streamlit run streamlit_app.py
 
 - Primary (кнопки, акценты, заголовки секций): `#4600FF`
 - Background: `#FFFFFF`
-- Шрифт: Poppins (Google Fonts)
+- Шрифт: Raleway (Google Fonts)
 - Tints для строк: orange `#FF7F42`, pink `#FF3895`, green `#3DD070`
 
 Палитра — словарь `BRAND` в `streamlit_app.py`.

@@ -32,6 +32,15 @@ import base64
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+
+# -----------------------------------------------------------------------------
+# Version — bumped on every change. Visible in the page footer so that anyone
+# embedding the widget (iframe) can verify which build is currently live.
+# See CHANGELOG.md in the repo for what's in each version.
+# -----------------------------------------------------------------------------
+
+APP_VERSION = "1.0.0"
+BUILD_DATE = "2026-05-12"
 from math import floor
 
 import pandas as pd
@@ -1826,6 +1835,17 @@ def main() -> None:
         "[open.er-api.com](https://open.er-api.com) (FX). "
         "USD tiers (USD / USD_CIS / USD_SASIA / USD_MENA / USD_LATAM) are "
         "differentiated manually by cc."
+    )
+
+    # Version label — small, dim, bottom-right.
+    # Anyone embedding via iframe can verify which build is live by reading
+    # this from the rendered page.
+    st.markdown(
+        f'<div style="text-align:right; color:#aaa; font-size:11px; '
+        f'padding-top:8px; font-family: \'Raleway\', sans-serif;">'
+        f'PRS v{APP_VERSION} · {BUILD_DATE}'
+        f'</div>',
+        unsafe_allow_html=True,
     )
 
 
